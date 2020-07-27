@@ -1,0 +1,926 @@
+---
+title: "Austin Animal Center"
+author: "Anna Bonaquist, Eliza Eddy, Marika Gutzman, Marissa Shand"
+date: "11/27/2019"
+output:
+ html_document:
+   toc: TRUE
+   theme: united
+   toc_depth: 3
+   number_sections: TRUE
+   df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Background Information
+
+The Austin Animal Center is the largest no-kill animal shelter in the United States, and it provides care and shelter to over 18,000 animals each year. To keep its no-kill animal shelter status, the AAC must maintain a live outcome of 90% or greater. Currently, the average live rate across the US is 68%, while in Austin it is 95%.^1^ In Austin, euthanasia is limited only to animals that are suffering or that are dangerous and cannot be rehabilitated. The AAC uses a comprehensive adoption program as well as a large volunteering and foster program to be successful as a no-kill shelter.  
+
+For the purposes of our analysis, we will be focusing on dogs only. Dogs represent 57% of Austin Animal Center's data. There are a few reasons for this choice:  
+1. Narrowing down to one animal allows us to use one set of summary statistics for the entire population, and understand the one population better;  
+2. We can spend time analyzing aspects of the population that would not be as relevant for other animals. E.g. dog purebred status affects outcome, but is unimportant for cats. Therefore we can dive deeper in our analysis;  
+3. Dogs are mostly domesticated, but populations of feral cats are common. This means background information about how many dogs are in the United States, where pet dogs are obtained, etc. will be more accurate than similar data for cats. This allows us to check results against national trends and support or dispute popular facts;  
+4. We all happen to own dogs so have more background knowledge and interest in this area.
+
+<div style="margin-bottom:50px;">
+
+# Importing and Joining the Data 
+
+As part of the AAC's efforts to help and care for animals in need, the organization makes available its accumulated data and statistics. This falls under Austin's Open Data Initiative, which is updated constantly. The data contains intakes and outcomes of animals entering the Austin Animal Center from the beginning of October 2013 to the present day. The data we will be looking at covers animals who entered the shelter after October 1, 2013 and left the shelter before November 20, 2019.
+
+First, let's begin by setting a working directory, loading data, and librarying necessary packages. We start with 111,818 recorded intakes and 111,508 recorded outcomes.
+
+```{r, message=FALSE}
+## Library the necessary packages
+library(ggplot2)
+library(tidyverse)
+library(lubridate)
+library(data.table)
+library(ggrepel)
+library(dplyr)
+library(ipred)
+library(caret)
+library(cvTools)
+library(rpart)
+library(reshape2)
+
+## Set the working directory 
+setwd("~/1st Semester 3rd Year/DS4001/Final_Project")
+## Load the intake data into a dataframe called intakes
+intakes <- read.csv("11.20 Austin_Animal_Center_Intakes.csv", header=TRUE, sep=",")
+## Load the outcome data into a dataframe called outcomes
+outcomes <- read.csv("11.20 Austin_Animal_Center_Outcomes.csv", header=TRUE, sep=",")
+## Load the animal promotions data into a dataframe called animalPromos
+animalPromos <- read.csv("animalPromos.csv", header=FALSE)
+names(animalPromos) <- c("Promo.Date", "Animal.ID")
+```
+  
+There are three Animal IDs of dogs that have negative time in shelter values, represented by Outcome.DateTime - Intake.DateTime. Let's take a look at these three Animal IDs (A632791, A681049, A730626). As we can see, their intakes and outcomes don't line up correctly, so let's remove these observations. 
+
+```{r}
+## There are three odd Animal.IDs that we will encounter later
+intakes %>% filter(Animal.ID == "A730626" | Animal.ID == "A632791" | Animal.ID == "A681049") %>% arrange(Animal.ID, DateTime)
+outcomes %>% filter(Animal.ID == "A730626" | Animal.ID == "A632791" | Animal.ID == "A681049") %>% arrange(Animal.ID, DateTime)
+
+## Remove troublesome Animal IDs
+intakes <- intakes %>% filter(!(Animal.ID == "A730626" | Animal.ID == "A632791" | Animal.ID == "A681049"))
+outcomes <- outcomes %>% filter(!(Animal.ID == "A730626" | Animal.ID == "A632791" | Animal.ID == "A681049"))
+```
+
+Let's see what features we have in each of our dataframes.
+
+```{r}
+colnames(intakes)
+colnames(outcomes)
+```
+  
+Let's select which features from each of the dataframes we want and change the names of some of the names of the features to refect if they provide intake or outcome information. In the intakes dataframe we didn't think the features Name and MonthYear (the month and year the animal was brought in) would be helpful in our analysis so we remove these features. In the outcomes dataframe, we removed Name and MonthYear for the same reasons, but also decided to remove Animal.Type because when we join, we will already have this information from the intakes dataframe.
+
+```{r}
+## Select features we want from the intakes dataframe
+intakes <- intakes %>% select(Animal.ID, Animal.Type, Sex.upon.Intake, Breed, Color, DateTime, Intake.Type, Found.Location, Intake.Condition, Age.upon.Intake)
+
+## Select features we want from the outcomes dataframe
+outcomes <- outcomes %>% select(Animal.ID, Sex.upon.Outcome, Date.of.Birth, DateTime, Outcome.Type, Outcome.Subtype, Age.upon.Outcome)
+
+## Change feature names for intakes dataframe and outcomes dataframe to reflect if they are intake or outcome information
+intakes <- intakes %>% rename("Intake.DateTime" = "DateTime", 
+                              "Intake.Sex" = "Sex.upon.Intake", 
+                              "Intake.Age" = "Age.upon.Intake")
+outcomes <- outcomes %>% rename("Outcome.DateTime" = "DateTime", 
+                                "Outcome.Sex" = "Sex.upon.Outcome", 
+                                "Outcome.Age" = "Age.upon.Outcome")
+```
+  
+Let's look to see what the type of each feature in the two dataframes are.
+
+```{r}
+sapply(intakes, class)
+sapply(outcomes, class)
+```
+
+<div style="margin-bottom:40px;">
+
+## Tidying the Dataframes for Joining
+
+Let's coerce some of the features into the proper type to make joining easier. We will coerce all the date features into year-month-day and make Animal.ID a character. 
+```{r}
+intakes$Intake.DateTime <- as.Date(intakes$Intake.DateTime, format = "%m/%d/%Y")
+intakes$Animal.ID <- as.character(intakes$Animal.ID)
+outcomes$Outcome.DateTime <- as.Date(outcomes$Outcome.DateTime, format = "%m/%d/%Y")
+outcomes$Date.of.Birth <- as.Date(outcomes$Date.of.Birth, format = "%m/%d/%Y")
+outcomes$Animal.ID <- as.character(outcomes$Animal.ID)
+```
+
+  
+In order to get the dataframes ready to join, we must first remove observations from the outcomes dataframe because there are animals who entered the shelter before the data collection date, so we don't have intake information on them. There are two parts that are involved in this cleaning.
+
+<div style="margin-bottom:30px;">
+
+### Removing Non-Matching Entries
+
+First, we remove observations of animals who only visited the shelter once and entered before October 1, 2013. This will be reflected by animals ID's being in the outcomes dataframe, but not in the intakes dataframe. There are 816 Animal ID's that are in the outcomes dataframe, but not in the intakes dataframe. Let's remove all observations in the outcomes dataframe that have Animal ID's in the outcomes dataframe but not the intake dataframe so that we are only looking at animals that we have intake information for. Now we have 110,685 observations in the outcomes dataframe.
+
+```{r}
+## Let's make a new dataframe called outcomes2 that has a new feature called same that will tell us if the animal ID is in the intakes dataframe
+outcomes2 <- outcomes %>% mutate(Animal.ID, same = ifelse(Animal.ID %in% intakes$Animal.ID, "YES", "NO"))
+dim(outcomes2 %>% filter(same == "NO"))
+
+## Let's keep the observations in outcomes that we have intake information on (same == "YES")
+## Then we don't need the feature "same" anymore, so we can remove this feature 
+outcomes <- outcomes2 %>% filter(same == "YES") %>% select(-same)
+dim(outcomes)
+```
+
+<div style="margin-bottom:30px;">
+
+### Tidying Frequent Flyers
+
+Next, we notice that there are some animals that came into the shelter more than once. Some of these animals came into the shelter before the data collection date started, so we have outcome information on them, but not intake information on those animals. To avoid this, let's see how many times the animal came into the shelter (intake.count) and how many times the animal left the shelter (outcome.count). If they left the shelter more times than they came into the shelter, then remove the first occurence for the animal ID in the outcomes dataframe so that we are only looking at animals that we have intake information for. We end up removing 107 observations, leaving 110,578 observations in our outcomes dataframe.
+
+```{r}
+## Part 2: If outcome.count > intake.count, remove the first occurence of outcome
+## Let's create a dataframe of all of the intake counts for each animal ID
+intakes.counts <- intakes %>% select(Animal.ID, Intake.DateTime) %>% group_by(Animal.ID) %>% summarize(i.count = n())
+
+## Let's create a dataframe of all of the outcome counts for each animal ID
+outcomes.counts <- outcomes %>% select(Animal.ID, Outcome.DateTime) %>% group_by(Animal.ID) %>% summarize(o.count = n())
+
+## Let's join these two dataframes into a dataframe called counts so that we can compare the intake and outcome counts
+counts <- intakes.counts %>% inner_join(outcomes.counts, by = c("Animal.ID" = "Animal.ID"))
+
+## Make a new feature called diff that will see if the outcome count is greater than the intake count
+## If the outcome count is greater than intake count, let's set diff = "Remove" to indicate that we want to remove the first outcome observation of that animal ID
+## Otherwise, let's mark it as "Keep"
+counts <- counts %>% mutate(diff = ifelse(o.count > i.count, "Remove", "Keep"))
+
+## Let's make a new dataframe called remove that contains all the animal IDs whose first outcome observation we want to remove 
+remove <- counts %>% filter(diff == "Remove")
+
+## How many observations do we want to remove?
+length(remove$Animal.ID)
+
+## Let's make a new feature to indicate the number outcome, per animal and sorted by date
+## This will allow us to remove the earliest outcome, for animals in the remove dataframe
+outcomes <- outcomes %>% group_by(Animal.ID) %>% arrange(Outcome.DateTime) %>% mutate(Outcome.Number = 1:n())
+
+## Looking at the outcomes dataframe, if the animal ID is in the remove dataframe, remove the first observation
+## Then remove the feature called "Outcome.Number" that we just created
+outcomes <- outcomes %>% filter((Animal.ID %in% remove$Animal.ID & Outcome.Number != "1") | (!(Animal.ID %in% remove$Animal.ID))) %>% select(-Outcome.Number)
+
+## How many observations do we have in the outcomes dataframe now? 
+dim(outcomes)
+```
+
+<div style="margin-bottom:40px;">
+
+## Making Keys for Joining
+
+The primary key we will use to join our data is Animal.ID. However, since there are animals that came through the shelter more than once, we will need another key that will join based on the visit number. Let's make a feature that will tell us what the visit number was for the animal (Intake.Number) and another feature that will tell us how many times the animal has left the shelter (Outcome.Number).  
+
+This Outcome.Number is distinct from the one we removed above because it renumbers those animals whose first outcome had to be removed.
+
+```{r}
+## Let's make a new feature that will tell us how many times an animal has entered the shelter
+intakes <- intakes %>% group_by(Animal.ID) %>% arrange(Intake.DateTime) %>% mutate(Intake.Number = 1:n())
+
+## Let's make a new feature that will tell us how many times an animal has left the shelter
+outcomes <- outcomes %>% group_by(Animal.ID) %>% arrange(Outcome.DateTime) %>% mutate(Outcome.Number = 1:n())
+```
+
+<div style="margin-bottom:30px;">
+
+### Joining the Dataframes
+
+Now we are ready to join our dataframes together. We will call this new dataframe intakes.outcomes. We will use a full join to join the intakes and outcomes dataframes and our keys to join the data will be Animal.ID and Intake/Outcome Number. There are 111,811 observations and 17 features in our joined dataframe. 
+
+```{r}
+## Join the intakes and outcomes dataframes 
+intakes.outcomes <- intakes %>% full_join(outcomes, by = c("Animal.ID" = "Animal.ID", "Intake.Number" = "Outcome.Number"))
+
+## How many observations do we have in our new dataframe?
+dim(intakes.outcomes)
+```
+<div style="margin-bottom:50px;">
+
+# Looking at and Cleaning the Data
+
+Right now in our dataframe intakes.outcomes, we have information on all the animals who have entered Austin Animal Center since October 1, 2013. However, as described in Background Information, we decided to look only at dogs who have entered and left the shelter. 
+
+Let's make a new dataframe called dogs that reflects this. We will filter the dataframe so that we only have information on dogs and will remove any missingness in outcome variables, which would indicate that the animal is still in the shelter.  
+
+```{r}
+## Let's make a new dataframe called dogs
+## We no longer need the Animal.Type feature since there is only one animal type now
+dogs <- intakes.outcomes %>% filter(Animal.Type == "Dog") %>% select(-Animal.Type)
+
+## Need to remove dogs that haven't left the shelter yet
+## These are observations that do not have an outcome date
+dim(dogs %>% filter(is.na(Outcome.DateTime) | Outcome.Type == ""))
+dogs <- dogs %>% filter(!(is.na(Outcome.DateTime) | Outcome.Type == ""))
+
+## How many observations do we have in our dogs dataframe?
+dim(dogs)
+```
+There are 63,206 dogs with data collected, and 578 of those dogs were still in the shelter at the end of our collection period. We removed those observations from our dataframe, leaving us with 62,628 observations of dogs who have entered and left the shelter. We no longer need the Animal.Type feature since there is only one animal type now.  
+
+What features do we have in our new dataframe?
+
+```{r}
+colnames(dogs)
+```
+<div style="margin-bottom:40px;">
+
+## Incomplete Information
+
+At first glance, it might look like we now have no missingness in out dataframe, but let's take a closer look at the data.
+
+```{r}
+## Which features do we see missing values in? 
+colnames(dogs)[colSums(is.na(dogs)) > 0]
+```
+
+While there may not be any NA values, there are still empty values (like "") which contribute to missingness. We can also see that there are unreasonable values in Intake.Sex and Outcome.Sex. There are 415 dogs that came in with their sex unknown or NULL. This is probably because the animal shelter did not check to see what sex the dog is. Since there are so few observations (0.66% of the data), let's remove all observations that have unknown or null sex. Now we have 62,213 observations.
+
+```{r}
+## What percentage of the data are unknown or null sex dogs?
+dim(dogs %>% filter(Intake.Sex == "Unknown" | Intake.Type == "NULL" | Outcome.Sex == "Unknown" | Outcome.Sex == "NULL"))
+dim(dogs %>% filter(Intake.Sex == "Unknown" | Intake.Type == "NULL" | Outcome.Sex == "Unknown" | Outcome.Sex == "NULL"))[1]/dim(dogs)[1]*100
+
+## Let's remove observations that have unknown or null sex
+dogs <- dogs %>% filter(!(Intake.Sex == "Unknown" | Intake.Sex == "NULL" | Outcome.Sex == "Unknown" | Outcome.Sex == "NULL"))
+dim(dogs)
+```
+
+  
+We also see that there are 43,259 empty values in Outcome.Subtype. Let's represent these with NAs.
+
+```{r}
+## How many empty observations do we have in Outcome.Subtype?
+dim(dogs %>% filter(Outcome.Subtype == ""))
+
+## Let's represent these empty values with NA
+## We must first make this feature a character, then we can turn it back into a factor
+dogs$Outcome.Subtype <- as.character(dogs$Outcome.Subtype)
+dogs <- dogs %>% mutate(Outcome.Subtype = ifelse(Outcome.Subtype == "", NA, Outcome.Subtype))
+dogs$Outcome.Subtype <- as.factor(dogs$Outcome.Subtype)
+```
+  
+We also see that there are dogs that have a negative intake age. This might be because the age or date of birth was input incorrectly into the database. Since there are only 5 instances, let's remove these observations.
+
+```{r}
+dogs %>% group_by(Intake.Age) %>% summarize(count = n())
+dogs <- dogs %>% filter(!(grepl("-1", Intake.Age) | grepl("-3", Intake.Age)))
+```
+  
+Another odd thing we noticed was that there were dogs who were born after we stopped collecting information. Looking at these observations, we think the shelter accidentally put 12 (December) instead of 02 (February) since the dogs were brought into the shelter in February 2019 at 0 years of age. So let's change these to reflect February, not December.
+
+```{r}
+## Let's take a look at dogs who were born after we stopped collecting data
+dogs %>% filter(grepl("2019-12", Date.of.Birth))
+
+## It looks like they were actually born in February, not December
+## To change their date of birth, we must first make date of birth a string, then we can change it back to a date
+dogs$Date.of.Birth <- as.character(dogs$Date.of.Birth)
+dogs <- dogs %>% mutate(Date.of.Birth = ifelse(grepl("2019-12-06", Date.of.Birth), "2019-02-06", Date.of.Birth))
+dogs$Date.of.Birth <- as.Date(dogs$Date.of.Birth)
+```
+<div style="margin-bottom:30px;">
+
+### Coercion 
+
+Let's take a look at what our dataframe looks like now. 
+
+```{r}
+summary(dogs)
+```
+  
+We made Animal.ID a character earlier so that it would be easier to join the data. Let's make Animal.ID a factor again.
+
+```{r}
+dogs$Animal.ID <- as.factor(dogs$Animal.ID)
+```
+  
+Right now Intake.Sex and Outcome.Sex both tell us the sex of the dog, but they also reflect whether the dog was fixed when it came into the shelter and then when it left the shelter. Let's make new variables that separate out this information, by changing Intake.Sex and Outcome.Sex to Sex, Intake.Fixed, and Outcome.Fixed.
+
+```{r}
+## What is the sex of the dog? Male or Female
+dogs <- dogs %>% mutate(Sex = ifelse(grepl("Male", Intake.Sex), "Male", "Female"))
+dogs$Sex <- as.factor(dogs$Sex)
+
+## Was the dog fixed when it came in to the shelter? Yes or No
+dogs <- dogs %>% mutate(Intake.Fixed = ifelse(grepl("Spayed|Neutered", Intake.Sex), "Yes", "No"))
+dogs$Intake.Fixed <- as.factor(dogs$Intake.Fixed)
+
+## Was the dog fixed when it left the shelter? Yes or No
+dogs <- dogs %>% mutate(Outcome.Fixed = ifelse(grepl("Spayed|Neutered", Outcome.Sex), "Yes", "No"))
+dogs$Outcome.Fixed <- as.factor(dogs$Outcome.Fixed)
+
+## Now that we have the information that we need from Intake.Sex and Outcome.Sex, we can remove these features
+dogs <- dogs %>% select(-Intake.Sex, -Outcome.Sex)
+```
+  
+Let's create separate features to indicate the year, month, and day of intake as well as outcome. These features will be useful to us later when we are doing our analysis. 
+
+```{r}
+## The year, month, and day that the dog was brought into the shelter
+dogs$Intake.Year <- year(dogs$Intake.DateTime)
+dogs$Intake.Month <- month(dogs$Intake.DateTime)
+dogs$Intake.Day <- day(dogs$Intake.DateTime)
+
+## The year, month, and day that the dog left the shelter
+dogs$Outcome.Year <- year(dogs$Outcome.DateTime)
+dogs$Outcome.Month <- month(dogs$Outcome.DateTime)
+dogs$Outcome.Day <- day(dogs$Outcome.DateTime)
+```
+  
+We can see that Intake.Type has a level called "Wildlife" that has 0 observations. Let's refactor Intake.Type to remove levels that have 0 observations. We will do this by making the variable a character and then a factor again. Let's do the same thing for Outcome.Type.
+
+```{r}
+## Refactoring Intake.Type 
+dogs$Intake.Type <- as.character(dogs$Intake.Type)
+dogs$Intake.Type <- as.factor(dogs$Intake.Type)
+
+## Refactoring Outcome.Type 
+dogs$Outcome.Type <- as.character(dogs$Outcome.Type)
+dogs$Outcome.Type <- as.factor(dogs$Outcome.Type)
+```
+  
+For the intake and outcome ages, we decided to make this easier to read and manipulate by using years as a constant unit for all of the observations. For example, a puppy's age is be represented by a decimal like "0.5" instead of "5 months." We create Intake.Age by subtracting the birthdate from the intake date and create Outcome.Age by subtracting the birthdate from the outcome date.  
+
+Since many of these dogs' birthdates and ages were both guessed together, this does not decrease the accuracy of our analysis. We round to 2 decimal points to further preserve accuracy.
+
+```{r}
+## Coercing intake and outcome age into years
+dogs$Intake.Age <- round((dogs$Intake.DateTime - dogs$Date.of.Birth)/365,2)
+dogs$Intake.Age <- as.character(dogs$Intake.Age)
+dogs$Intake.Age <- as.numeric(dogs$Intake.Age)
+
+dogs$Outcome.Age <- round((dogs$Outcome.DateTime - dogs$Date.of.Birth)/365,2)
+dogs$Outcome.Age <- as.character(dogs$Outcome.Age)
+dogs$Outcome.Age <- as.numeric(dogs$Outcome.Age)
+
+dogs %>% select(Animal.ID, Intake.Age, Outcome.Age) %>% head()
+```
+  
+Looking at Intake.Age and Outcome.Age, we can see that there are negative values. When we take a look back at the original intakes and oucomes dataframes, we see that some dogs had 0 years input for age, so let's change these negative values to 0. Presumably these dogs, who came in as "Nursing," were born in the shelter.
+
+```{r}
+dogs %>% filter(Intake.Age < 0 | Outcome.Age < 0)
+dogs <- dogs %>% mutate(Intake.Age = ifelse(Intake.Age < 0, 0, Intake.Age))
+dogs <- dogs %>% mutate(Outcome.Age = ifelse(Outcome.Age < 0, 0, Outcome.Age))
+```
+
+<div style="margin-bottom:50px;">
+
+# Feature Engineering
+
+Earlier, we created features called Intake.Number and Outcome.Number that reflected the dog's visit number to the shelter. We also decided to create time features for the intake and outcome, such as the day of the week.  
+
+We wanted to engineer some additional features to use for the analysis of our data. We created a flag variable to tell us if a dog is a purebred or not, since this may affect its likelihood to be adopted. We created another flag variable to tell us if a dog contains Pit Bull, to help us investigate a breed that has many negative stereotypes. Additionally, we created a feature to tell us if the dog is all black, has some black color, or does not have any black color, to look for a possible tendency called Black Dog Syndrome.^2^ The last feature we engineered was the time the dog was in the shelter, made from subtracting the intake date from the outcome date. 
+
+```{r}
+## The day of the week the dog was brought into the shelter
+dogs$Intake.DayOfWeek <- weekdays(dogs$Intake.DateTime)
+dogs$Intake.DayOfWeek <- factor(dogs$Intake.DayOfWeek, levels= c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"))
+
+## The day of the week the dog left the shelter
+dogs$Outcome.DayOfWeek <- weekdays(dogs$Outcome.DateTime)
+dogs$Outcome.DayOfWeek <- factor(dogs$Outcome.DayOfWeek, levels= c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"))
+
+## Seasons
+## Winter: December 21 - March 19
+## Spring: March 20 - June 20
+## Summer: June 21 - September 22
+## Fall: September 23 - December 20
+
+## The season that the dog entered the shelter
+dogs <- dogs %>% mutate(Intake.Season = ifelse(Intake.Month == 1 | Intake.Month == 2, "Winter",
+                                        ifelse(Intake.Month == 4 | Intake.Month == 5, "Spring", 
+                                        ifelse(Intake.Month == 7 | Intake.Month == 8, "Summer", 
+                                        ifelse(Intake.Month == 10 | Intake.Month == 11, "Fall", 
+                                        ifelse(Intake.Month == 12 & Intake.Day <= 20, "Fall", 
+                                        ifelse(Intake.Month == 12 & Intake.Day >= 21, "Winter", 
+                                        ifelse(Intake.Month == 3 & Intake.Day <= 19, "Winter", 
+                                        ifelse(Intake.Month == 3 & Intake.Day >= 20, "Spring", 
+                                        ifelse(Intake.Month == 6 & Intake.Day <= 20, "Spring", 
+                                        ifelse(Intake.Month == 6 & Intake.Day >= 21, "Summer", 
+                                        ifelse(Intake.Month == 9 & Intake.Day <= 22, "Summer", 
+                                        ifelse(Intake.Month == 9 & Intake.Day >= 23, "Fall", "NA")))))))))))))
+dogs$Intake.Season <- factor(dogs$Intake.Season, levels= c("Spring", "Summer", "Fall", "Winter"))
+
+## The season that the dog left the shelter
+dogs <- dogs %>% mutate(Outcome.Season = ifelse(Outcome.Month == 1 | Outcome.Month == 2, "Winter",
+                                        ifelse(Outcome.Month == 4 | Outcome.Month == 5, "Spring", 
+                                        ifelse(Outcome.Month == 7 | Outcome.Month == 8, "Summer", 
+                                        ifelse(Outcome.Month == 10 | Outcome.Month == 11, "Fall", 
+                                        ifelse(Outcome.Month == 12 & Outcome.Day <= 20, "Fall", 
+                                        ifelse(Outcome.Month == 12 & Outcome.Day >= 21, "Winter", 
+                                        ifelse(Outcome.Month == 3 & Outcome.Day <= 19, "Winter", 
+                                        ifelse(Outcome.Month == 3 & Outcome.Day >= 20, "Spring", 
+                                        ifelse(Outcome.Month == 6 & Outcome.Day <= 20, "Spring", 
+                                        ifelse(Outcome.Month == 6 & Outcome.Day >= 21, "Summer", 
+                                        ifelse(Outcome.Month == 9 & Outcome.Day <= 22, "Summer", 
+                                        ifelse(Outcome.Month == 9 & Outcome.Day >= 23, "Fall", "NA")))))))))))))
+dogs$Outcome.Season <- factor(dogs$Outcome.Season, levels= c("Spring", "Summer", "Fall", "Winter"))
+
+## Now that we have used Intake.Month as a numerical to determine the season, let's change Intake.Month to the abbreviation for month to make the visualizations later look better
+## Change Intake.Month to be a factor and appear in sequential order
+dogs$Intake.Month <- month.abb[dogs$Intake.Month]
+dogs$Intake.Month <- factor(dogs$Intake.Month, levels = c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"))
+
+## Now that we have used Outcome.Month as a numerical to determine the season, let's change Outcome.Month to the abbreviation for month to make the visualizations later look better
+## Change Outcome.Month to be a factor and appear in sequential order
+dogs$Outcome.Month <- month.abb[dogs$Outcome.Month]
+dogs$Outcome.Month <- factor(dogs$Outcome.Month, levels = c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"))
+
+## Is the dog a purebred? Yes = 1, No = 0
+dogs <- dogs %>% mutate(Purebred = ifelse(grepl("/|Mix", Breed), 0, 1))
+dogs$Purebred <- as.factor(dogs$Purebred)
+# 6,602 Yes 55,606 No
+
+## Does the dog contain some Pit Bull in it? Yes = 1, No = 0
+dogs <- dogs %>% mutate(Pitbull = ifelse(grepl("Pit Bull", Breed), 1, 0))
+dogs$Pitbull <- as.factor(dogs$Pitbull)
+# 10,243 Yes, 51,965 No
+
+## Make a new column to denote if a dog is all black, has some black coloring, 
+## or does not have any, then coerce the feature to be a factor
+dogs$Black <- ifelse(!grepl("Black", dogs$Color, fixed=TRUE) & !grepl("Tricolor", dogs$Color, fixed=TRUE), "No Black", NA)
+dogs$Black <- ifelse(dogs$Color == "Black", "All Black", dogs$Black)
+dogs$Black <- ifelse(is.na(dogs$Black), "Some Black", dogs$Black)
+dogs$Black <- as.factor(dogs$Black)
+# 3,294 All Black, 21,767 Some Black, 37,147 No Black
+
+## Create feature for time in shelter, represented as the difference between intake date and outcome date
+dogs <- dogs %>% mutate(Time.In.Shelter = Outcome.DateTime - Intake.DateTime)
+dogs$Time.In.Shelter <- as.character(dogs$Time.In.Shelter)
+dogs$Time.In.Shelter <- as.numeric(dogs$Time.In.Shelter)
+# mean is 16.02 days
+```
+  
+Now we can take a final look at our clean dataframe before we do visualizations!
+
+```{r}
+summary(dogs)
+```
+
+<div style="margin-bottom:50px;">
+
+# Visualizations
+
+Our visualizations were driven by questions posed throughout our initial research, as well as our own personal interests in the adoption of dogs. Our exploratory visualizations showed us how the AAC has improved over the years and gave us a better understanding of trends within the shelter. We also decided to make more specific visualizations related to different topics in which we took interest. By making these visualizations, we will be provided with some insight as to how animal shelters are being run, and will see in what ways they can be improved.
+
+<div style="margin-bottom:40px;">
+
+## Exploratory Visualizations
+
+To begin, we decided to take a look at how the adoption rate, transfer rate, and live rate have changed from 2014 to 2018. We can see that between 2014 and 2018, the live rate has increased from 0.94 to 0.99, the transfer rate has decreased from 0.23 to 0.20, and the adoption rate has increased from 0.71 to 0.79. This table shows that dogs are getting euthanized at a lower rate and more dogs get adopted out. 
+
+```{r}
+## Live rate, transfer rate, and adoption rate of dogs from 2014 to 2018
+dogs %>% filter(!Intake.Year == 2013 & !Intake.Year == 2019) %>% group_by(Intake.Year) %>% 
+  summarize(live.rate = sum((!Outcome.Type == "Euthanasia")/n()), 
+            transfer.rate = 1-sum((!Outcome.Type == "Transfer")/n()), 
+            adoption.rate = sum((Outcome.Type == "Adoption" | 
+                                 Outcome.Type == "Return to Owner" |
+                                 Outcome.Type == "Rto-Adopt")/n()))
+```
+  
+When we look at the different reasons dogs left the shelter, we can see that most of the dogs were adopted out of the shelter, returned to their owner, or were transferred out.
+
+```{r}
+## Outcome type vs number of dogs
+dogs %>% ggplot() + geom_bar(aes(Outcome.Type), fill = "#6F58B8") + ggtitle("Outcome Type vs Number of Dogs") + xlab("Outcome Type") + ylab("Number of Dogs") + theme(plot.title = element_text(hjust = 0.5))
+```
+  
+Looking at the outcomes of adopted dogs by day of week, we can see that there is a large increase on the weekends. It makes sense to see an increase in adoptions at the end of the week because people typically work Monday through Friday, so if they adopt a dog on the weekend then they will have more time to get set up and adjust to life with a dog before having to work an 8-hour shift again, away from the dog. 
+
+```{r}
+## Adopted dog outcomes by day of the week 
+dogs %>% filter(Outcome.Type == "Adoption") %>% ggplot() + geom_bar(aes(Outcome.DayOfWeek), fill = "#6F58B8") + ggtitle("Adopted Dog Outcomes by Day of Week") + xlab("Day of Week") + ylab("Number of Dogs Adopted") + theme(plot.title = element_text(hjust = 0.5))
+```
+  
+Looking at the average time in shelter of dogs with different intake conditions, we can see that dogs who are pregnant, nursing, have a medical issue, or are injured stay in the shelter longer than other dogs. This makes sense because these animals generally need more care (and medical attention) than other dogs, and it can take them awhile to be ready for adoption. We also see that dogs with a behavioral issue are in the shelter longer, as people are less likely to adopt a dog with a behavioral issue. 
+
+```{r}
+## Average Time in Shelter by Intake Condition
+dogs %>% filter(!Intake.Condition == "Other") %>% group_by(Intake.Condition) %>% summarize(avg.stay = mean(Time.In.Shelter)) %>% ggplot() + geom_bar(aes(x = Intake.Condition, y = avg.stay), stat = "identity", fill = "#6F58B8") + ggtitle("Average Time in Shelter by Intake Condition") + xlab("Intake Condition") + ylab("Average Time in Shelter") + theme(axis.text.x = element_text(angle = 45, hjust = 1), plot.title = element_text(hjust = 0.5))
+```
+  
+Next, we look at the average time in shelter of purebreds versus mixed dogs that were adopted. We can see that on average, purebreds are in the shelter 8 days less than mixed dogs. This might be because purebreds are rarer in the shelter and cost a lot from a breeder.
+
+```{r}
+## Average time in shelter of purebreds and mixed dogs 
+dogs %>% filter(Outcome.Type == "Adoption") %>% group_by(Purebred) %>% summarize(avg.time.in.shelter = mean(Time.In.Shelter))
+```
+
+This result is not surprising, but it is disappointing nonetheless. Multiple studies have shown that identifying dog breed by morphology, as opposed to DNA or breeding, is highly innaccurate, and that shelter personnel do a bad job of it.^3 4 5^ They are largely non-expert volunteers, and even within a litter morphology can vary greatly. This means that dogs that happen to be tagged with only one breed are likely to spend less time in a shelter.
+
+<div style="margin-bottom:40px;">
+
+## Let's Dive Deeper
+
+<div style="margin-bottom:30px;">
+
+### Euthanasia
+
+First, we will look at the outcome subtype of euthanized dogs, which will provide us information on why a dog was euthanized. We can see that if a dog was euthanized, it was primarily because the dog was either aggressive or suffering, as noted in the Background Information section.
+
+```{r, message = FALSE, warning = FALSE}
+## Euthanized Dogs by Outcome Subtype
+dogs %>% filter(Outcome.Type == "Euthanasia") %>% ggplot(aes(Outcome.Subtype)) + geom_bar(fill = "#6F58B8") + ggtitle("Why Dogs Were Euthanized") + xlab("Reason") + ylab("Number of Dogs Euthanized") + theme(plot.title = element_text(hjust = 0.5))
+```
+  
+Next, we will look at the average time in shelter of euthanized dogs by the reason they were euthanized. We can see that dogs who are euthanized and have gone through a court investigation are in the shelter the longest. The reason a dog might have gone through a court investigation is because the dog bit a person or another animal. It makes sense that they are in the shelter the longest, because their owner will most likely be trying to fight to save the dog's life and this will cause the court investigation to drag on. We can also see that dogs that were euthanized because they were suffering have the shortest time in shelter on average. It is understandable that they have the shortest average stay because if the dog is suffering, the shelter will most likely not want to keep the dog in pain needlessly. Therefore, they will quickly put the dog down. 
+
+```{r}
+## Average time in shelter of euthanized dogs by the reason they were euthanized
+dogs %>% filter(Outcome.Type == "Euthanasia" & !is.na(Outcome.Subtype)) %>% group_by(Outcome.Subtype) %>% summarize(avg.time.in.shelter = mean(Time.In.Shelter)) %>% arrange(desc(avg.time.in.shelter))
+```
+  
+The two most common reasons for a dog to be put down is because it is either suffering or aggressive. Let's take a deeper look into this.  
+
+Let's look at the age of suffering dogs and what their condition is when they come into the shelter. When we look at the age of euthanized dogs who are suffering, we see that it is mostly younger dogs who are suffering with a spike at 10 year old dogs. When we look at the intake condition of the dog, we see that most of the dogs who were euthanized because of suffering came into the shelter with an injury. The dog was probably euthanized in this case because the injury was not able to be repaired, or the repair would decrease the dog's quality of life. This is part of the no-kill regulations AAC follows.^1^
+
+```{r}
+## Graph the number of suffering dogs euthanized by their age
+dogs %>% filter(Outcome.Type == "Euthanasia" & Outcome.Subtype == "Suffering") %>% ggplot(aes(Intake.Age)) + geom_histogram(binwidth = .5, fill = "#6F58B8") + ggtitle("Number of Suffering Dogs Euthanized by Age") + xlab("Age of Dog") + ylab("Number of Dogs Euthanized") + theme(plot.title = element_text(hjust = 0.2))
+
+## Graph the number of suffering dogs euthanized by their intake condition 
+dogs %>% filter(Outcome.Type == "Euthanasia" & Outcome.Subtype == "Suffering") %>% ggplot(aes(x = Intake.Condition, y = ..prop.., group = 1)) + geom_bar(fill = "#6F58B8") + ggtitle("Number of Suffering Dogs Euthanized by Intake Condition") + xlab("Intake Condition") + ylab("Number of Dogs Euthanized") + theme(plot.title = element_text(hjust = 0.5))
+```
+
+Looking at aggressive dogs, it looks like Pit Bulls have the highest amount of euthanasias, but they are also the most common breed that the AAC sees. When we control for how many of the breed are coming in and look at the percentage of the breed that was euthanized because of aggression, we see that the Pit Bull Mix breed does not have the highest percentage. Surprisingly, it is the Yorkshire Terrier/Maltese breed. This is due to low frequency of that breed being euthanized -- 1 out of 11 dogs is aggressive.
+
+```{r}
+## Let's look at dog breed counts of dogs that were euthanized because they were aggressive
+head(dogs %>% filter(Outcome.Type == "Euthanasia" & Outcome.Subtype == "Aggressive") %>% group_by(Breed) %>% summarize(count = n()) %>% arrange(desc(count)))
+
+## Let's look at the percentage of a breed that was euthanized because of aggression
+head(dogs %>% group_by(Breed) %>% mutate(breed_total = n()) %>% filter(Outcome.Type == "Euthanasia" & Outcome.Subtype == "Aggressive") %>% group_by(Breed) %>% mutate(aggressive_total = n()) %>% select(Breed, breed_total, aggressive_total) %>% distinct(Breed, .keep_all = TRUE) %>% mutate(percentage = aggressive_total/breed_total*100) %>% arrange(desc(percentage)) %>% filter(breed_total>10))
+```
+
+The Pit Bull Mix breed does not have the highest percentage of dogs who were euthanized because of aggression. However, when we look at dogs that contain some Pit Bull, we see that these dogs are euthanized at double the rate of dogs that do not have a Pit Bull label.
+
+```{r}
+#Euthanasia rate for dogs with the pitbull flag and dogs without the pitbull flag
+dogs %>% group_by(Pitbull) %>% mutate(total = n()) %>% filter(Outcome.Type == "Euthanasia") %>% mutate(euthanized = n()) %>% select(Pitbull, total, euthanized) %>% distinct(Pitbull, .keep_all = TRUE) %>% mutate(euthanasia.rate = euthanized/total*100)
+```
+
+It begs the question, then: are dogs that come in aggressive more likely to be labeled Pit Bull? Is the behavior of Pit Bulls more likely to be interpreted as aggressive, and is that due to breed stereotypes? Or are Pit Bulls genuinely more aggressive?  
+
+One study shows that mixed breed dogs are accurately identified about 10% of the time and only ~5% of shelter dogs are actually purebred.^6^ Another study shows that shelter workers are likely to intentionally misidentify dogs of controversial breeds if they think it will help adoption chances.^7^ All of this information combined shows that a shelter dog's listed breed is just about worthless, and brings into question breed labeling altogether.
+
+<div style="margin-bottom:30px;">
+
+### Adoption Deal Days 
+
+While looking at the Austin Animal Center's Instagram page, we noticed many adoption deals where adoption fees were reduced or waived to encourage more adoptions. We decided to look at the days where deals occured to see if the number of adoptions did indeed increase. We focused on a handful of adoption events that have happened in  2019.  
+
+We made another table to keep track of the adoptions each day.
+
+```{r}
+## Create new data frame, grouped by the outcome date, with the total number of outcomes and adoptions each day
+adoptions_per_day <- dogs %>% group_by(Outcome.DateTime) %>% summarise(Total_Outcomes = n(), Adoptions = sum(Outcome.Type == "Adoption" | Outcome.Type == "Rto-Adopt"))
+
+## Calculate the adoption rate per day
+adoptions_per_day$Adoption_Rate <- adoptions_per_day$Adoptions/adoptions_per_day$Total_Outcomes
+
+## Separate column for day, month, and year for easy graphing
+adoptions_per_day$Outcome_Year <- year(adoptions_per_day$Outcome.DateTime)
+adoptions_per_day$Outcome_Month <- month(adoptions_per_day$Outcome.DateTime)
+adoptions_per_day$Outcome_Day <- day(adoptions_per_day$Outcome.DateTime)
+
+## Coerce into factors
+adoptions_per_day$Outcome_Year <- as.factor(adoptions_per_day$Outcome_Year)
+adoptions_per_day$Outcome_Month <- as.factor(adoptions_per_day$Outcome_Month)
+
+## Let's take a look our new adoption dataframe 
+head(adoptions_per_day)
+```
+  
+From October 11th to October 13th, there was a "Name Your Price" deal to encourage more adoptions due to shelter overcrowding. We saw that on the 13th, there was a spike in adoptions. We think that this was due to the deal, but we also noticed that the number of adoptions was especially high on the 13th because it was a Sunday. We hypothesize that more people had heard about the adoption sale by the end of the weekend, and therefore the most dogs adopted due to the deal occurred on Sunday.  
+
+From October 25th to the end of the month, there was a reduced price on dogs to celebrate Halloween. A similar trend is seen, where there is an increase in dog adoption throughout the weekend, with a peak on Sunday.
+
+```{r}
+## Look at the number of adoptions each day in the month of October
+adoptions_per_day %>% filter(Outcome_Year == 2019, Outcome_Month == 10) %>% ggplot(aes(x=Outcome_Day, y=Adoptions)) + geom_point(color = "#6F58B8") + geom_line(color = "#6F58B8") + ggtitle("Dogs Adopted in October 2019") + xlab("Day") + ylab("Number of Dogs Adopted") + theme(axis.text.x = element_text(angle = 45, hjust = 1), plot.title = element_text(hjust = 0.5))
+```
+  
+In September 2019 the Austin Animal Center had two adoption events. From September 13th to September 15th, Austin celebrated 8 years of its status as a "No Kill" city. The shelter ran an adoption special, and a subsequent upwards spike in adoptions was seen on Saturday, September 14th and Sunday, September 15th. The weekend of September 27th, the shelter celebrated Fall Fest. The most dogs adopted that month occurred on the Sunday of Fall Fest.
+
+```{r}
+## Look at the number of adoptions each day in the month of September
+adoptions_per_day %>% filter(Outcome_Year == 2019, Outcome_Month == 09) %>% ggplot(aes(x=Outcome_Day, y=Adoptions)) + geom_point(color = "#6F58B8") + geom_line(color = "#6F58B8") + ggtitle("Dogs Adopted in September 2019") + xlab("Day") + ylab("Number of Dogs Adopted") + theme(axis.text.x = element_text(angle = 45, hjust = 1), plot.title = element_text(hjust = 0.5))
+```
+  
+On August 17th, there was a "Clear the Shelters" event, where over 60 dogs were adopted. This was more than double the number of adoptions on any other given day in August.
+
+```{r}
+## Look at the number of adoptions each day in the month of August
+adoptions_per_day %>% filter(Outcome_Year == 2019, Outcome_Month == 08) %>% ggplot(aes(x=Outcome_Day, y=Adoptions)) + geom_point(color = "#6F58B8") + geom_line(color = "#6F58B8") + ggtitle("Dogs Adopted in August 2019") + xlab("Day") + ylab("Number of Dogs Adopted") + theme(axis.text.x = element_text(angle = 45, hjust = 1), plot.title = element_text(hjust = 0.5))
+```
+  
+In July, adoption fees were waved for the 6th and the 7th. The most dogs adopted that month occured on the 7th, a Sunday.
+
+```{r}
+## Look at the number of adoptions each day in the month of July
+adoptions_per_day %>% filter(Outcome_Year == 2019, Outcome_Month == 07) %>% ggplot(aes(x=Outcome_Day, y=Adoptions)) + geom_point(color = "#6F58B8") + geom_line(color = "#6F58B8") + ggtitle("Dogs Adopted in July 2019") + xlab("Day") + ylab("Number of Dogs Adopted") + theme(axis.text.x = element_text(angle = 45, hjust = 1), plot.title = element_text(hjust = 0.5))
+```
+  
+In June 2019 there were a handful of adoption specials:  
+- From June 7th to 9th, there was an adoption special on dogs to celebrate National Donut Day. We *donut* see a large increase in the number of dogs adopted, perhaps because it is not a recognized holiday.  
+- From June 13th to 16th, the shelter offered $10 adoptions to celebrate Father's Day. The same trend from above is seen here, where the Sunday of the adoption event shows a significant increase in the number of dogs adopted.  
+- On June 23rd, the shelter had a PuppyPalooza event. However, this must not have been too successful, as fewer than 15 dogs were adopted that day. This was another event not placed on a major holiday.  
+- From June 28th to June 30th, the shelter waived adoption fees due to overcrowding. The same trend is seen, where the most dogs were adopted on Sunday the 30th, although Saturday the 29th comes close as well.
+
+```{r}
+## Look at the number of adoptions each day in the month of June
+adoptions_per_day %>% filter(Outcome_Year == 2019, Outcome_Month == 06) %>% ggplot(aes(x=Outcome_Day, y=Adoptions)) + geom_point(color = "#6F58B8") + geom_line(color = "#6F58B8") + ggtitle("Dogs Adopted in June 2019") + xlab("Day") + ylab("Number of Dogs Adopted") + theme(axis.text.x = element_text(angle = 45, hjust = 1), plot.title = element_text(hjust = 0.5))
+```
+  
+Overall, it seems that adoption specials on holidays recognized and celebrated by many families result in more adoptions. Additionally, adoption specials run because the shelter was reaching capacity also resulted in more adoptions -- maybe due to fees being entirely waived on some dogs. During adoption events we see that Sundays are the most popular day to adopt dogs, with Saturday close behind. This is not surprising, as most people would logically want to adopt on the weekend when they are not at work. Additionally, many of the specials run from a Friday to a Sunday, so it may take some time for people to hear about the adoption special and decide to adopt a dog, leaving Sunday to be the most successful day for adoptions during specials.  
+
+As people interested in seeing dogs go to families, seeing that adoption events can be successful is exciting. However, as researchers, we wanted to confirm that this method of adoption would be a positive force for animals. Adoption events expedite the process, allowing people to bypass usually-thorough home visits and interviews. AAC  takes in way more animals than it can technically handle, so expediting adoption may be necessary.^8^ But some critics are concerned that skipping vetting means animals are going to unsafe environments.^9^  
+
+One study showed that of people willing to be surveyed years after an adoption event, 94% reported strong attachment to their pet -- so even though the pet was free, an owner sees its value. "Most pets lived... indoors, slept on the family bed, and had been to a veterinarian."^10^ That eased our concerns for the dogs' well-being.
+
+<div style="margin-bottom:30px;">
+
+### Promoted Dogs on Instagram
+
+When looking at the Austin Animal Center's Instagram page, we noticed that they occasionally promote dogs and include the unique Animal IDs. We were curious to see if this had any effect on the dog's time in the shelter.  
+
+So to begin, a python script was written to parse through the captions of the Instagram posts. Each Animal ID and the corresponding date the dog was promoted on Instagram was put into a csv file called "animalPromos.csv", which was downloaded at the beginning of this file. From here we were able to investigate the relationship between promotions and time remaining in the shelter. 
+
+```{r}
+## Coerce Promo.Date into the correct format (year-month-day)
+animalPromos$Promo.Date <- as.Date(animalPromos$Promo.Date)
+
+## Create a new dataframe with only the promoted dogs
+promotedDogs <- merge(dogs, animalPromos, by="Animal.ID")
+
+## Create new feature called "Time.After.Promo" which tells us how soon after the dog was promoted that the dog left the shelter
+promotedDogs <- promotedDogs %>% mutate(Time.After.Promo = ifelse(!is.na(Promo.Date) & Promo.Date %within% interval(Intake.DateTime, Outcome.DateTime), Outcome.DateTime - Promo.Date, NA))
+
+## Since some dogs are brought into the shelter mutliple times, we also need to make sure that the promotion took place between the Intake and Outcome dates. It would also be useful to see how long the dog had been in the shelter before the promo, so we created a new feature called "Time.Before.Promo".
+promotedDogs <- promotedDogs %>% mutate(Time.Before.Promo = ifelse(!is.na(Promo.Date) & Promo.Date %within% interval(Intake.DateTime, Outcome.DateTime), Promo.Date - Intake.DateTime, NA))
+
+## Let's make these new features numeric variables
+promotedDogs$Time.After.Promo <- as.character(promotedDogs$Time.After.Promo)
+promotedDogs$Time.After.Promo <- as.numeric(promotedDogs$Time.After.Promo)
+
+promotedDogs$Time.Before.Promo <- as.character(promotedDogs$Time.Before.Promo)
+promotedDogs$Time.Before.Promo <- as.numeric(promotedDogs$Time.Before.Promo)
+
+## Some of the dogs have a negative Time.After.Promo which means the promo was done after they were adopted. These could be from showing past successes, so they will be removed as they are likely not a promo. We also want to get rid of the dogs that have a promo during a time that they weren't in the shelter.
+promotedDogs <- promotedDogs %>% filter(Time.After.Promo>0)
+
+## Merge promoted Dogs into all of the dog data and create new dataframe called "newDogs". Promoted is a feature that will have "Yes" or "No" as to whether the dog was promoted or not. 
+mergePromo <- promotedDogs %>% select("Animal.ID","Promo.Date","Time.After.Promo", "Time.Before.Promo")
+newDogs <- merge(dogs, mergePromo, by="Animal.ID", all=TRUE)
+newDogs <- mutate(newDogs, Promoted = ifelse(!is.na(Promo.Date), "Yes", "No"))
+newDogs$Promoted <- as.factor(newDogs$Promoted)
+
+```
+  
+Looking at just the averages between dogs that were promoted and dogs that weren't, we can see that dogs that were promoted actually had a much longer average time in the shelter.  
+
+```{r}
+## Look at the average stay of dogs who were promoted and dogs who were not 
+newDogs %>% select(Time.In.Shelter, Promoted) %>% group_by(Promoted) %>% summarize(Avg.Time.In.Shelter = mean(Time.In.Shelter)) %>% ggplot(mapping=aes(Promoted,Avg.Time.In.Shelter)) + geom_bar(stat="identity", fill="#6F58B8") + ggtitle("The Effect of Time in Shelter on Instagram Promotion") + ylab("Average Number of Days In Shelter") + theme(plot.title = element_text(hjust = 0.5))
+```
+  
+Looking closer, we see that dogs who were not promoted stayed in the shelter around 15 days on average, while dogs who were promoted were in the shelter 46 days on average before they were promoted. From these statistics we can infer that the dogs who are promoted have been in the shelter longer, and the shelter is trying to bring attention to them so that they will be adopted.
+
+```{r}
+## Looking at the average stay of dogs who were not promoted
+newDogs %>% filter(Promoted == "No") %>% summarize(Avg.Time.In.Shelter = mean(Time.In.Shelter)) 
+
+## Looking at the average time before the promotion of a dog
+newDogs %>% filter(Promoted == "Yes") %>% summarize(Avg.Time.Before.Promo = mean(Time.Before.Promo))
+```
+  
+Additionally, if a dog was promoted, on average the dog left the shelter 34 days after it was promoted.
+
+```{r}
+## What is the average stay after the dog is adopter? 
+newDogs %>% filter(Promoted == "Yes") %>% summarize(Avg.Time.After.Promo = mean(Time.After.Promo))
+```
+  
+When comparing each individual promoted dog, we can see that generally, the dogs spent a much longer time in the shelter before the promotion as opposed to after the promotion.
+
+```{r}
+promotedDogs.long <- melt(promotedDogs, id="Animal.ID", measure=c("Time.In.Shelter","Time.Before.Promo","Time.After.Promo"))
+
+promotedDogs.long %>% ggplot(mapping=aes(Animal.ID, value, color=variable, group=variable)) + geom_point() + theme(axis.text.x=element_blank(), legend.title=element_blank()) + scale_color_manual(values = c("#468ACA", "#50B049", "#F4A13F")) + ggtitle("Time In Shelter: Before and After Instagram Promotions") + ylab("Number of Days In Shelter")
+```
+  
+Overall, it does appear that promotions have an affect on time the dog has left before it leaves the shelter. The dogs that are promoted are dogs that have already spent longer in the shelter, and are likely more difficult to adopt out. However, once these dogs are promoted they are likely adopted sooner than without the promotion.
+
+<div style="margin-bottom:30px;">
+
+### Fixed 
+
+Next, we investigate whether or not dogs left the shelter fixed. We saw that most dogs that were adopted or returned to their owner left the shelter fixed. We also saw that dogs that were euthanized or transferred had about a 50/50 split for whether or not they left the shelter fixed.
+
+```{r}
+## Outcome type by outcome.fixed
+dogs %>% filter(Outcome.Type == "Adoption" | Outcome.Type == "Euthanasia" | Outcome.Type == "Return to Owner" | Outcome.Type=="Transfer") %>% ggplot() + geom_bar(aes(x=Outcome.Type, fill = Outcome.Fixed), position = "dodge2") + ggtitle("Outcome Type with Fixed Outcome") + xlab("Outcome Type") + ylab("Number of Dogs") + theme(plot.title = element_text(hjust = 0.5)) + labs(fill = "Fixed Upon Outcome") + scale_fill_manual(values = c("#F4A13F", "#6F58B8"))
+```
+  
+Using the data indicating if a dog was fixed when it entered the shelter and left the shelter, we see that 41% of dogs that come into the shelter get fixed in the shelter. This likely makes them much more adoptable. However, 22% of dogs do not come in fixed and do not get fixed. These dogs are likely transferred or returned to their owner. Lastly, 37% of dogs come in fixed already, suggesting they may be returned to an owner, transferred, or adopted.
+
+```{r}
+## Percentage of dogs that are not fixed when they come in but leave fixed
+fixed_in_shelter<-sum(dogs$Intake.Fixed=="No" & dogs$Outcome.Fixed=="Yes")/sum(!is.na(dogs$Animal.ID))*100
+never_fixed<-sum(dogs$Intake.Fixed=="No" & dogs$Outcome.Fixed=="No")/sum(!is.na(dogs$Animal.ID))*100
+fixed_before<-sum(dogs$Intake.Fixed=="Yes" & dogs$Outcome.Fixed=="Yes")/sum(!is.na(dogs$Animal.ID))*100
+fixed <- matrix(c(fixed_in_shelter, never_fixed, fixed_before),ncol=1, byrow=TRUE)
+colnames(fixed) <- c("Percentage")
+rownames(fixed) <- c("Fixed in shelter", "Not fixed", "Fixed prior to shelter")
+fixed
+```
+<div style="margin-bottom:30px;">
+
+### Black Dogs 
+
+While doing research we read about Black Dog Syndrome, a name shelter workers have coined to describe the tendency of people preferring to adopt light colored dogs over black dogs.^2^ Black dogs are harder to photograph, so they are often less popular on adoption websites. Additionally, some people find black dogs scarier than yellow or brown dogs, as expressions may be harder to see. Some may find the black hair to easier to spot on furniture than lighter hair. Whatever the reason behind Black Dog Syndrome, some shelters insist it is more difficult for their black dogs to get adopted. We decided to look into the adoption of dogs with all black color, some black color, and no black color from the AAC.  
+
+First, we saw that the Austin Animal Center sees many more dogs without any black color than dogs with some black or dogs that are all black. 
+
+```{r}
+## Look at the differences in number of all black, no black, and some black
+dogs %>% group_by(Black) %>% summarise(count = n())
+```
+  
+We wanted to see if black dogs in Austin do indeed spend more time in the shelter, which would confirm existing folk wisdom of Black Dog Syndrome. We saw that dogs with some black actually spent the least amount of time in the shelter on average, followed by all black dogs. Dogs with no black actually spent the most time in the shelter on average.  
+
+However, since No Black is also the largest category, it makes sense that it may include many dogs who have been in the shelter for a long time, possibly skewing the average time in the shelter. This dataset is huge, so it's likely dogs of all ages were distributed across the categories. In general though, it does not appear that black dogs spend more time in the shelter in Austin.
+
+```{r}
+#Look at the average time in shelter for each 
+dogs %>% group_by(Black) %>% summarise(Avg_Time_in_Shelter=mean(Time.In.Shelter)) %>% arrange(desc(Avg_Time_in_Shelter))
+```
+  
+Next, we wanted to investigate the adoption rates of dogs by their color. Just because black dogs aren't in the shelter longer than other dogs doesn't mean they are being adopted. They could be transferred, returned to their owner, or euthanized. We looked at the outcome type of dogs by color to find out. We saw that the proportion of dogs with some black that were adopted was nearly 50%. The proportion of dogs with no black that were adopted was about 45%, while the proportion of completely black dogs that were adopted was about 44%. It seems that dogs with some black are the most popular, as they have been adopted at a higher rate and spend less time in the shelter. Perhaps people in Austin find dogs with a mix of colors to be most attractive.  
+
+A final note about this graph is that all black dogs have a slightly higher proportion of being returned to owners than dogs with only some black. Perhaps more black dogs go missing at night, end up in shelters, and are then returned to their owners. This might make sense, as it can be very difficult to see a black dog in the dark, so black dogs may be easier to lose and harder to find, therefore need to be returned to owners more often from shelters.  
+
+```{r}
+## Look at outcome subtype, shows adoption rate is highest for some black, lowest for all black
+ggplot(data=filter(dogs, Outcome.Type == "Adoption" | Outcome.Type == "Died" | Outcome.Type == "Euthanasia" | Outcome.Type == "Return to Owner" | Outcome.Type == "Rto-Adopt" | Outcome.Type=="Transfer"), aes(x = Outcome.Type, y= ..prop.., group=1)) + geom_bar(fill = c("#6F58B8", "#468ACA", "#50B049", "#F4A13F", "#FFFD78", "#989898", "#6F58B8", "#468ACA", "#50B049", "#F4A13F", "#FFFD78", "#989898", "#6F58B8", "#468ACA", "#50B049", "#F4A13F", "#FFFD78", "#989898")) + facet_wrap(~Black) + theme(axis.text.x = element_text(angle = 45, hjust = 1), plot.title = element_text(hjust = 0.5)) + ggtitle("Outcome Type of Dogs by Blackness") + xlab("Outcome Type") + ylab("Proportion") 
+```
+  
+Finally, we investigated the intake type of dogs by color. We thought that the Black Dog Syndrome could also be reflected through more stray black dogs, or perhaps more owner surrenders. Yet, looking at the proportion of each intake type for the different degrees of blackness of dogs, we saw no significant differences. From our investigation, there seems to be no proof of Black Dog Syndrome from the Austin Animal Center data.
+
+```{r}
+## Look at intake type by color
+ggplot(data=dogs, aes(x = Intake.Type, y= ..prop.., group=1)) + geom_bar(fill = c("#6F58B8", "#468ACA", "#50B049", "#F4A13F", "#6F58B8", "#468ACA", "#50B049", "#F4A13F", "#6F58B8", "#468ACA", "#50B049", "#F4A13F")) + facet_wrap(~Black) + theme(axis.text.x = element_text(angle = 45, hjust = 1), plot.title = element_text(hjust = 0.5)) + ggtitle("Intake Type of Dogs by Blackness") + xlab("Intake Type") + ylab("Proportion")
+```
+  
+These findings do not preclude the existence of Black Dog Syndrome, but it doesn't seem to exist in Austin.
+
+<div style="margin-bottom:30px;">
+
+### Hurricane Harvey
+
+While doing initial research on the Austin Animal Shelter, we read about the number of animals that were displaced when Hurricane Harvey hit in late August, 2017.^11^ There was so much displacement that animals were even brought to the Charlottesville-Albemarle SPCA following the hurricane. We decided to look into the number of intakes each month in 2017 to see if we could notice an increase due to Hurricane Harvey. 
+
+```{r}
+## Hurricane Harvey at the end of August 2017 shows an increase in intake in September
+dogs %>% filter(Intake.Year == 2017) %>% ggplot(aes(Intake.Month)) + geom_bar(fill = "#6F58B8") + ggtitle("Dog Intakes by Month in 2017") + xlab("Month") + ylab("Number of Dogs Taken In") + theme(plot.title = element_text(hjust = 0.5))
+```
+  
+We saw that in August 2017, dog intakes to the shelter look pretty standard. However, in September 2017 we see the most intakes to the shelter during any month that year. We suspect this is due to Hurricane Harvey, because it hit Texas in late August. By the time animals were gathered and processed, it was likely September.  
+
+We next wanted to make sure that the increase in September 2017 was not consistent across all years. We plotted the intake of dogs each month, excluding 2017 and excluding 2013 and 2019 since those years we do not have data for every month. We saw that typically, September does not have the highest number of dog intakes. This reassured us that the increase in September 2017 was due to Hurricane Harvey.
+
+```{r}
+## Plot the number of dogs taken in each month, from years not including 2017, or 2013 and 2019 as that data is incomplete
+dogs %>% filter(Intake.Year != 2017 & Intake.Year !=2013 & Intake.Year !=2019) %>% ggplot(aes(Intake.Month)) + geom_bar(fill = "#6F58B8") + ggtitle("Dog Intakes by Month excluding 2017") + xlab("Month") + ylab("Number of Dogs Taken In") + theme(plot.title = element_text(hjust = 0.5))
+```
+  
+We looked at the number of dogs taken in each day in 2017 from the beginning of August through the end of September. It was evident that September 1st and the couple of days following showed a large increase in dog intake in Austin, likely due to Hurricane Harvey.
+
+```{r}
+## Plot the number of dogs taken in each day from August through September 2017
+dogs %>% filter(Intake.Year == 2017, Intake.Month == "Sep" | Intake.Month == "Aug") %>% ggplot(aes(Intake.DateTime)) + geom_bar(fill = "#6F58B8") + ggtitle("Dog Intakes by Day from August through September 2017") + xlab("Day") + ylab("Number of Dogs Taken In") + theme(axis.text.x = element_text(angle = 45, hjust = 1), plot.title = element_text(hjust = 0.5))
+```
+  
+In fact, looking across all of 2017, September 1st, 2017 still stands out. It is the only date in all of 2017 to show more than 80 dogs taken in on a single day. The days following Hurricane Harvey are also notable, showing more than 60 dogs taken in on September 3rd, and 60 on September 4th.
+
+```{r}
+## Plot the number of dogs taken in each day across all of 2017
+dogs %>% filter(Intake.Year == 2017) %>% ggplot(aes(Intake.DateTime)) + geom_bar(fill = "#6F58B8") + ggtitle("Dog Intakes throughout 2017") + xlab("Day") + ylab("Number of Dogs Taken In") + theme(axis.text.x = element_text(angle = 45, hjust = 1), plot.title = element_text(hjust = 0.5))
+```
+<div style="margin-bottom:50px;">
+
+# Machine Learning 
+
+First, we import the dataframe for machine learning. This is necessary because the model was not running properly with our joined intakes.outcomes data, so we pulled pre-joined data off of Kaggle to use instead.
+```{r}
+dogs <- read.csv("mldogs.csv", header=TRUE, sep=",")
+```
+
+We wanted to see if we could predict whether a dog's outcome would be Adopted or not based on information that was collected when the dog was brought into the shelter. We tried using machine learning to make the prediction. First, we looked at using cross validation.  
+
+Feature selection was difficult for this process, as we don't have data on important information, such as temperament and personality of each dog, that would be influential in the decision to adopt a dog or not. It was also difficult because there is only so much information that is collected when the dog is brought into the shelter. We were not able to use features like Time.In.Shelter or Outcome.Suptype that provide useful information about the dog, as it would bias the result. We decided not to use features like the day or month that a dog was adopted to make the decision, because those features do not describe the dog itself. We were not able to use Breed and Color because these are factor variables with more than 53 categories. We decided not to include Fixed because although many dogs were not brought in as fixed, many dogs left fixed, so this will not provide much information to us.  
+
+We decided to include sex and age as features, because they provide important information about the dog that people use when deciding what dog to adopt. We also decided to use intake type and intake condition, in hopes that these features might show a little bit about the background of the dog and its temperament. Lastly, we included Pitbull and Purebred as features, because some people are biased against pitbulls or non-purebred dogs.
+
+First, let's make our dataframe that we will use to make our model.
+
+```{r}
+#Make column, 1 if adopted and 0 if not
+dogs_model <- dogs
+dogs_model$Adopted <- ifelse(dogs_model$Outcome.Type == "Adoption" | dogs_model$Outcome.Type == "Rto-Adopt", 1,0)
+dogs_model$Adopted <- as.factor(dogs_model$Adopted)
+
+#Pick features for use in the model and limit frame to those
+dogs_model <- select(dogs_model, "Sex", "Intake.Age", "Intake.Type", "Intake.Condition", "Pitbull", "Purebred", "Adopted")
+```
+
+<div style="margin-bottom:40px;">
+
+## Cross Validation
+
+We first made the training and test sets, then created the model. We chose the best model to be our final model, and created predictions. We saw an accuracy of about 67%.
+
+```{r}
+#Create training and test sets
+ind <- createDataPartition(dogs_model$Adopted,p = 0.8, list = FALSE)
+train <- dogs_model[ind,]
+test <- dogs_model[-ind,]
+
+#Set up for 10 fold cv
+caret.control <- trainControl(method = "repeatedcv", number = 10, repeats = 0)
+rpart.cv <- train(Adopted~., data = train, method = "rpart",
+                  trControl = caret.control, tuneLength = 15)
+rpart.best <- rpart.cv$finalModel
+
+#Create predictions and find accuracy
+preds <- predict(rpart.cv, test, type = "raw")
+table(test$Adopted, preds)
+accuracy <- sum(test$Adopted==preds)/length(test$Adopted)
+accuracy
+```
+
+<div style="margin-bottom:40px;">
+
+## Bagging
+
+Lastly, we tried using the same features with a bagging model. We saw a similar accuracy of around 66%.
+
+```{r}
+#Machine learning using bagging
+bag <- bagging(Adopted~.,data=train, coob=TRUE, nbagg=100, na.action = na.pass)
+
+# Create predictions and find accuracy
+bag_preds <- predict(bag, newdata=test)
+table(test$Adopted, bag_preds)
+accuracy <- sum(test$Adopted==bag_preds)/length(test$Adopted)
+accuracy
+```
+
+We were not surprised that the machine learning attempts aren't great, because crucial information about adopting a dog is not shown in our features. Whether or not a dog is cute, likes to be pet, is active, barks loudly, and so on are important to people, but not shown in our data.  
+
+Additionally, many different people have very different qualities that they want to see in a dog they will potentially adopt. There isn't one objective ideal with dogs, and preferences change over time. While predicting whether or not a dog will be adopted is worthwhile and semi-useful, the data does not exist for it to be an accurate endeavor. A useful application of this effort would be toward matching prospective adopters with dogs, but in any case adoption is much more driven by the adopter than the dog.
+
+<div style="margin-bottom:50px;">
+
+# Conclusion
+
+Many of our findings backed up hypotheses created by our initial research. For example, when we read about the AAC as a no-kill shelter we learned that it must still euthanize some animals if they are suffering or aggressive beyond rehabilitation. Our analysis backed up this information, finding that the majority of euthanasias were due to a dog coming to the shelter with an injury or aggressive behavior. The AAC is held accountable because its data is public. We find it very interesting that we can fact check the AAC by analyzing its data -- clearly this is an organization genuinely trying to do its best, with an honest spirit.  
+
+Additionally, we were able to draw some conclusions as to which dogs tend to be more adoptable. Younger, fixed, and purebred dogs generally spent the least amount of time in the shelter. By realizing this, the AAC might more effort into encouraging people to adopt dogs that do not fit into these categories. Providing resources on easy care routines for older dogs and minimizing breed labels are two steps toward modifying the trend.  
+
+Another hypothesis confirmed by analysis was the impact of Hurricane Harvey in Austin. It was interesting to confirm the increase in the intake of dogs following the hurricane. However, since the intake did not continue to show high numbers and displaced dogs were brought at least as far as Charlottesville to be adopted, we can assume that the shelter was brought to capacity following Harvey. Larger organizations backed by disaster funding and groups specializing in pet transportation were able to relieve the AAC's need to take in so many dogs.^12^ As a no-kill shelter, the AAC will often struggle with space for dogs.  
+
+One hypothesis that did not come to fruition was the potential for Black Dog Syndrome. While other shelters have found that fewer black dogs are adopted, we are glad that Austin does not see the same problem. Our lack of evidence for Black Dog Syndrome leads us to wonder how the analysis that sometimes finds Black Dog Syndrome is conducted. We know that a data analyst can purposely make small changes in how data is calculated to reflect what they want to see, especially for a good cause like uncovering potential unfairness toward dogs.  
+
+A final notable point was the use of advertising by the AAC. We find it encouraging that the AAC promotes the dogs that have already spent weeks in the shelter. It seems only fair that they are given visibility and the chance to be seen in their best light, as they have been in the shelter long enough. This is proof of the care and attention that the workers of the AAC give to the animals.  
+
+We are heartened by the good work of Austin Animal Center's many volunteers in getting dogs adopted, to the point of providing expensive unnecessary treatments like fixing dogs to increase their odds. Please adopt from a shelter -- your next best friend would love to meet you.
+
+<div style="margin-bottom:50px;">
+
+# References
+
+1. [No kill rules](http://www.austintexas.gov/blog/no-kill-austin)  
+2. [Black dog syndrome](https://slate.com/technology/2014/06/black-dog-syndrome-are-people-racist-against-black-pets.html)  
+3. [Study: What’s in a Name? Effect of Breed Perceptions & Labeling on Attractiveness, Adoptions & Length of Stay for Pit-Bull-Type Dogs.](https://doi.org/10.1371/journal.pone.0146857)  
+4. [Study: shelter staff are bad at identifying dog breed](https://www.sciencedirect.com/science/article/pii/S109002331500310X#bb0010)  
+5. [Study: morphology impacts length of stay](https://www.tandfonline.com/doi/figure/10.1080/10888705.2013.740967?scroll=top&needAccess=true)  
+6. [Study: only 10% of mixed dogs are labeled correctly by shelters, only 5% of shelter dogs are purebred](https://www.sciencedaily.com/releases/2018/08/180823140949.htm)  
+7. [Study: shelter workers in areas with Breed-Specific Legislation purposefully misidentify dogs](https://www.sciencedaily.com/releases/2014/09/140910132439.htm)  
+8. [Volunteers say AAC is unsustainable](https://www.kut.org/post/austin-city-council-loves-its-no-kill-animal-shelter-volunteers-say-its-unsustainable)  
+9. [Volunteers say AAC is over-crowded, conflict with Austin government](https://www.austinchronicle.com/news/2019-02-08/austin-animal-center-strains-to-maintain-its-no-kill-status/)  
+10. [Study: good outcomes of adoption events](https://sheltermedicine.vetmed.ufl.edu/files/2012/06/MacArthur-Adoption-Outcomes-Maddies-Adoptathon.pdf)  
+11. [Dogs and Hurricane Harvey](https://www.spca.org/hurricane-harvey)  
+12. [Pet transportation following Hurricane Harvey](http://www.animalalliancenyc.org/wordpress/2017/09/wheels-of-hope-help-hurricane-harvey-pets/)  
